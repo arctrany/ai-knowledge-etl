@@ -1,0 +1,30 @@
+name: web-knowledge-extractor
+version: 1.0.0
+description: >
+  Extract knowledge from web pages by leveraging your existing browser sessions.
+  Supports reusing user login state, screenshot capture, and content extraction
+  to specified output directories.
+author: haowu
+license: MIT
+
+components:
+  skills:
+    - web-extractor
+  commands:
+    - extract
+    - screenshot
+
+keywords:
+  - browser
+  - web scraping
+  - knowledge extraction
+  - screenshot
+  - content extraction
+  - playwright
+
+dependencies:
+  mcp:
+    - "@playwright/mcp"
+
+links:
+  documentation: https://github.com/microsoft/playwright-mcp

@@ -1,0 +1,91 @@
+# Knowledge-ETL Centralized Configuration
+# All agents and skills should reference these limits
+
+version: "3.2.0"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SAFETY LIMITS - Prevent "Prompt Too Long" errors
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+image:
+  max_size_bytes: 307200      # 300 KB
+  max_width_px: 800
+  max_per_session: 5
+  compression_quality: 80
+
+text:
+  max_chars_per_file: 20000
+  max_snapshot_chars: 30000
+  max_total_output: 50000
+
+pdf:
+  max_pages: 15
+
+batch:
+  max_files: 5
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CRAWL LIMITS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+crawl:
+  max_depth: 3
+  max_pages_default: 20
+  max_pages_hard: 50
+  request_interval_seconds: 2
+  same_domain_only: true
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RELEVANCE SCORING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+relevance:
+  url_match_score: 3
+  anchor_match_score: 5
+  context_match_score: 2
+  max_score: 10
+  dfs_threshold: 8      # Score >= 8: Deep exploration
+  bfs_threshold: 5      # Score 5-7: Breadth scan
+  skip_threshold: 5     # Score < 5: Skip
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RETRY CONFIGURATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+retry:
+  max_attempts: 3
+  initial_delay_seconds: 1
+  backoff_multiplier: 2
+  max_delay_seconds: 10
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# OUTPUT PATHS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+paths:
+  default_output_dir: ".knowledge-etl"
+  pages_subdir: "pages"
+  links_subdir: "links"
+  output_subdir: "output"
+  playwright_dir: ".playwright-mcp"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# URL FILTERS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+filters:
+  exclude_extensions:
+    - .pdf
+    - .zip
+    - .exe
+    - .mp4
+    - .mp3
+    - .rar
+    - .7z
+  exclude_paths:
+    - login
+    - logout
+    - signup
+    - cart
+    - checkout
+    - /auth/

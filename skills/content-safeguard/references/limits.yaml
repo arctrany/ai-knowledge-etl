@@ -1,0 +1,53 @@
+# Content Safeguard - Configurable Limits
+# These limits prevent "Prompt Too Long" errors
+
+image:
+  max_size_bytes: 307200      # 300 KB
+  max_width_px: 800
+  per_session_max: 5
+  compression_quality: 80
+  fallback_widths: [800, 640, 400]
+
+text:
+  per_file_chars: 20000
+  snapshot_chars: 30000
+  total_output_chars: 50000
+  truncation_notice: true
+
+pdf:
+  max_pages: 15
+  summarize_beyond: true
+
+batch:
+  max_files: 5
+  max_total_size_mb: 1
+  max_images: 3
+
+crawl:
+  max_depth: 3
+  max_pages: 50
+  request_delay_ms: 2000
+
+# Fallback strategies
+fallback:
+  content:
+    - full
+    - truncate
+    - key_sections
+    - summary
+    - headings_only
+    - fail
+
+  image:
+    - original
+    - compress_800
+    - compress_640
+    - compress_400
+    - fail
+
+  url:
+    - snapshot
+    - screenshot
+    - scroll_capture
+    - summary_only
+    - fail
