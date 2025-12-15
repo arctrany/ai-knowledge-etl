@@ -82,65 +82,309 @@ Git URL              → Clone then Directory Flow
 
 ---
 
-## URL Extraction Flow
+## URL Content Processing Flow
 
-### Step 1: Navigate
 ```
-mcp__playwright__browser_navigate(url: "{URL}")
-mcp__playwright__browser_wait_for(time: 3)
-```
-
-### Step 2: Check for Login (CRITICAL)
-```
-mcp__playwright__browser_snapshot(filename: "check.md")
-Read(".playwright-mcp/check.md")
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  ⚠️ THIS AGENT PROCESSES LOCAL FILES ONLY                                 ║
+║                                                                            ║
+║  URL capture (Playwright) is done by caller in MAIN context.              ║
+║  This agent receives pre-captured snapshot/screenshot files.              ║
+╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
-**Login Detection Keywords:**
-- Chinese: 登录, 登陆, 用户名, 密码, 验证码, 扫码登录
-- English: login, sign in, username, password, SSO, oauth
+**Input from caller:**
+- `.playwright-mcp/snapshot.md` - Page snapshot (text)
+- `.playwright-mcp/screenshot.png` - Page screenshot (fallback)
+- `.playwright-mcp/images.json` - Image metadata (NEW)
+- `.playwright-mcp/img_*.jpg` - Downloaded page images, pre-compressed (NEW)
 
-**If Login Detected:**
-```
-AskUserQuestion:
-  question: "检测到需要登录。请在浏览器中完成登录，完成后点击继续。"
-  options: ["已完成登录", "取消提取"]
+### ⚠️ EXTRACTION PRIORITY: Snapshot FIRST, Screenshot FALLBACK ONLY
 
-If "已完成登录":
-  mcp__playwright__browser_wait_for(time: 2)
-  Re-check page (max 3 attempts)
-If "取消提取":
-  Close browser, return error
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🎯 PRIORITY: TEXT SNAPSHOT ALWAYS PREFERRED OVER SCREENSHOT              ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  WHY SNAPSHOT IS BETTER:                                                  ║
+║  ✅ Preserves actual text (searchable, copyable)                         ║
+║  ✅ Preserves image URLs (can download separately)                       ║
+║  ✅ Much lighter tokens (text << image)                                  ║
+║  ✅ Faster processing                                                     ║
+║  ✅ Better structure extraction (headings, lists)                        ║
+║                                                                           ║
+║  WHY SCREENSHOT IS WORSE:                                                 ║
+║  ❌ Loses image download capability completely!                          ║
+║  ❌ Much heavier tokens (expensive)                                       ║
+║  ❌ Text becomes approximate (OCR-like)                                  ║
+║  ❌ Structure harder to extract                                          ║
+║                                                                           ║
+║  USE SCREENSHOT ONLY WHEN:                                                ║
+║  - Snapshot is empty or <100 chars (anti-scrape blocked it)              ║
+║  - Dynamic/canvas content not captured in snapshot                       ║
+║  - User explicitly requests visual capture                               ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
-### Step 3: Capture Content
-```
-mcp__playwright__browser_snapshot(filename: "snapshot.md")
-mcp__playwright__browser_take_screenshot(filename: "screenshot.png")
-mcp__playwright__browser_close()
+### Step 1: Check Snapshot Size
+
+```bash
+SIZE=$(stat -f%z ".playwright-mcp/snapshot.md" 2>/dev/null || echo "0")
+echo "[Extract] snapshot size: ${SIZE} bytes"
 ```
 
-### Step 4: Process (Apply content-safeguard)
+### Step 2: Process Content (Apply content-safeguard)
 
 **Prefer snapshot over screenshot** (text is lighter):
 ```bash
-# Check snapshot size
-SIZE=$(stat -f%z ".playwright-mcp/snapshot.md" 2>/dev/null || echo "0")
-
 if [ "$SIZE" -gt 100 ]; then
   # Use snapshot (text)
-  Read(".playwright-mcp/snapshot.md")
-  # Truncate if > 30,000 chars
+  # CRITICAL: Check line count and read in chunks if needed!
+  LINES=$(wc -l < ".playwright-mcp/snapshot.md")
+
+  if [ "$LINES" -gt 500 ]; then
+    # Large file: read in chunks, summarize each chunk
+    # Chunk 1: first 500 lines
+    Read(".playwright-mcp/snapshot.md", limit: 500)
+    # Summarize chunk 1, store summary
+
+    # Chunk 2: next 500 lines (if exists)
+    Read(".playwright-mcp/snapshot.md", offset: 500, limit: 500)
+    # Summarize chunk 2, append to summary
+
+    # Continue until done, then combine summaries
+  else
+    # Small file: read directly
+    Read(".playwright-mcp/snapshot.md")
+  fi
 else
   # Fall back to screenshot
   # Check size, compress if > 300KB
   "${CLAUDE_PLUGIN_ROOT}/scripts/compress-image.sh" \
     ".playwright-mcp/screenshot.png" \
     ".playwright-mcp/screenshot-compressed.jpg" 800
+  Read(".playwright-mcp/screenshot-compressed.jpg")
 fi
 ```
 
-### Step 5: Return Markdown
+**Chunking Strategy for Large Snapshots:**
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  LARGE SNAPSHOT (>500 lines) PROCESSING                                   ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  1. Read chunk (500 lines) → Extract key info → Store summary            ║
+║  2. Read next chunk → Extract key info → Append to summary               ║
+║  3. Repeat until EOF                                                      ║
+║  4. Combine summaries into final output                                   ║
+║                                                                           ║
+║  NEVER read entire large file at once!                                   ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+### Step 3: Extract and Transform Text
+
+- Extract text content from snapshot
+- Parse document structure (headings, lists, tables)
+- Structure as Markdown
+
+### Step 4: Process Downloaded Images (OPTIMIZED)
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🖼️ PAGE IMAGE PROCESSING - ALWAYS USE COMPRESSED VERSION                 ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  Image locations (after download-images.sh):                             ║
+║  - Original: {output_dir}/images/img_*.png                               ║
+║  - Compressed: {output_dir}/images/compressed/img_*.jpg (<100KB)         ║
+║                                                                           ║
+║  🚨 ALWAYS use compressed version for analysis!                          ║
+║  - Compressed images are optimized for model context (<100KB)            ║
+║  - Original images may be too large and cause "Prompt too long"         ║
+║                                                                           ║
+║  Processing rules:                                                        ║
+║  1. ALWAYS check compressed/ directory first                             ║
+║  2. Read ONE compressed image at a time                                  ║
+║  3. Describe immediately, store as text                                  ║
+║  4. If read fails, return error - NEVER fabricate content                ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Step 4.1: Check for compressed images (PRIORITY)**
+```bash
+# ALWAYS use compressed directory first
+COMPRESSED_DIR="${OUTPUT_DIR}/images/compressed"
+
+if [ -d "$COMPRESSED_DIR" ]; then
+  IMAGE_COUNT=$(ls -1 "$COMPRESSED_DIR"/img_*.jpg 2>/dev/null | wc -l)
+  echo "[Extract] Found ${IMAGE_COUNT} compressed images in $COMPRESSED_DIR"
+else
+  echo "[Extract] ⚠ No compressed directory found, checking original..."
+  IMAGE_COUNT=$(ls -1 "${OUTPUT_DIR}/images"/img_*.png 2>/dev/null | wc -l)
+fi
+
+# Read metadata if available
+if [ -f "${OUTPUT_DIR}/images.json" ]; then
+  Read("${OUTPUT_DIR}/images.json")
+fi
+```
+
+**Step 4.2: Process each COMPRESSED image**
+```bash
+IMAGE_DESCRIPTIONS=""
+PROCESSED=0
+SKIPPED=0
+
+# Use compressed images (optimized for model analysis)
+for img_file in "$COMPRESSED_DIR"/img_*.jpg; do
+  [ -f "$img_file" ] || continue
+
+  # Check file size (should be <100KB after compression)
+  SIZE=$(stat -f%z "$img_file" 2>/dev/null || stat -c%s "$img_file" 2>/dev/null || echo "0")
+
+  # Skip if still too large (compression failed)
+  if [ "$SIZE" -gt 102400 ]; then
+    echo "[Extract] ⚠ skipping $img_file (${SIZE} bytes > 100KB, compression may have failed)"
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
+
+  if [ "$SIZE" -lt 1000 ]; then
+    echo "[Extract] ⚠ skipping $img_file (too small, likely failed download)"
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
+
+  PROCESSED=$((PROCESSED + 1))
+  echo "[Extract] ████████░░ | analyzing compressed image $PROCESSED: $img_file (${SIZE} bytes)"
+
+  # Read ONE compressed image
+  Read("$img_file")
+
+  # 🚨 CRITICAL: If read fails or image is unreadable:
+  # - Return "[ERROR] Unable to read image"
+  # - NEVER guess or make up content!
+
+  # Describe immediately using visual analysis
+  # Generate structured description based on actual visible content
+
+  # Store description
+  IMAGE_DESCRIPTIONS="${IMAGE_DESCRIPTIONS}
+---
+**[Image ${PROCESSED}: {alt_from_metadata or 'Figure'}]**
+Type: {flowchart|architecture|screenshot|chart|table|photo}
+
+{detailed_visual_description_from_actual_image}
+
+Key elements:
+- {element_1}
+- {element_2}
+- {element_3}
+---
+"
+
+  # Limit to 15 images max (increased from 5)
+  if [ "$PROCESSED" -ge 15 ]; then
+    echo "[Extract] ⚠ reached max 15 images, stopping"
+    break
+  fi
+done
+
+echo "[Extract] ██████████ | processed $PROCESSED images, skipped $SKIPPED"
+```
+
+**Step 4.3: Image Description Templates**
+
+Use appropriate template based on detected image type:
+
+| Type | Template Focus |
+|------|----------------|
+| `flowchart` | Nodes, connections, flow direction, decision points |
+| `architecture` | Layers, components, relationships, data flow |
+| `screenshot` | UI elements, layout, visible text, interactive elements |
+| `chart` | Chart type, data series, axes, trends, key values |
+| `table` | Headers, rows, key data points |
+| `photo` | Subject, context, relevant details |
+
+Example descriptions:
+
+```markdown
+---
+**[Image 1: 服务商招商流程图]**
+Type: flowchart
+
+整体流程：服务商入驻 → 创建邀请码 → 商家扫码 → 商家激活 → 合作生效
+
+关键节点：
+- 起点：服务商完成入驻审核
+- 决策点：商家是否在10天内完成激活
+- 终点：合作状态变为"合作中"或"已失效"
+
+流向说明：
+1. 服务商创建邀请链接后生成唯一邀请码
+2. 商家扫码后进入待激活状态
+3. 10天内完成激活则绑定成功，否则失效
+---
+```
+
+### Step 5: Generate Page Summary (for Crawl Mode)
+
+When processing pages for crawl mode, always generate a summary for downstream transform agents.
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  📝 SUMMARY GENERATION - REQUIRED FOR CRAWL MODE                          ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  WHY: Transform agents cannot safely read 20+ pages (400KB+ content)     ║
+║  SOLUTION: Generate 500-char summary per page during extraction          ║
+║                                                                           ║
+║  Summary captures:                                                        ║
+║  - Main topic/purpose (1 sentence)                                       ║
+║  - Key concepts (3-5 bullet points)                                      ║
+║  - Important examples/patterns (if any)                                  ║
+║  - Links to related topics                                               ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Summary Generation Template:**
+
+```markdown
+## Page Summary
+
+**Title**: {page_title}
+**URL**: {page_url}
+**Relevance**: {score}/10
+
+### Main Topic
+{one_sentence_summary}
+
+### Key Points
+- {key_point_1}
+- {key_point_2}
+- {key_point_3}
+
+### Keywords
+{comma_separated_keywords}
+```
+
+**Output File Structure (Crawl Mode):**
+```
+{output_dir}/pages/
+├── 001_page_title.md        # Full extracted content
+├── 001_page_title.summary   # 500-char summary (NEW)
+├── 002_another_page.md
+├── 002_another_page.summary
+└── ...
+```
+
+### Step 6: Combine and Return Markdown
+
 ```markdown
 ---
 source: {url}
@@ -363,31 +607,61 @@ stats:
 
 ---
 
-## Progress Output (REQUIRED)
-
-Output progress in this format during execution:
+## Progress Output (REQUIRED - USE TodoWrite)
 
 ```
-[Extract] ████░░░░░░ 40% | navigating to URL...
-[Extract] ██████░░░░ 60% | snapshot.md (12K chars)
-[Extract] ████████░░ 80% | compressed: 1.2MB→280KB
-[Extract] ██████████ 100% ✓ output: 001_doc.md
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 NEVER USE TEXT OUTPUT FOR PROGRESS - USE TodoWrite INSTEAD 🚨        ║
+║                                                                           ║
+║  Text output accumulates in context → "Prompt is too long" error          ║
+║  TodoWrite renders in UI statusline → No context growth                   ║
+╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
-**Rules:**
-1. One line per major step
-2. Only key info: filename, size, compress ratio
-3. No content, no debug, no full paths
-4. `...` = in progress, `✓` = done, `⚠` = warning
+**Use TodoWrite to update progress:**
 
-**Key milestones to report:**
-- Page loaded
-- Snapshot captured (size)
-- Image compressed (before→after)
-- Images skipped (count + reason)
-- Login required (waiting)
-- Fallback used (reason)
-- Output written (filename + size)
+```javascript
+// Initialize task list at start
+TodoWrite({
+  todos: [
+    { content: "Extract content", status: "in_progress", activeForm: "Checking snapshot size..." },
+    { content: "Process images", status: "pending", activeForm: "Processing images" },
+    { content: "Generate output", status: "pending", activeForm: "Generating output" }
+  ]
+})
+
+// Update activeForm for detailed status
+TodoWrite({
+  todos: [
+    { content: "Extract content", status: "in_progress", activeForm: "Reading snapshot (12K chars)..." },
+    ...
+  ]
+})
+
+// Mark complete and move to next
+TodoWrite({
+  todos: [
+    { content: "Extract content", status: "completed", activeForm: "Extracted content" },
+    { content: "Process images", status: "in_progress", activeForm: "Compressing (2/5)..." },
+    ...
+  ]
+})
+```
+
+**activeForm examples:**
+- `"Checking snapshot size..."`
+- `"Reading chunk 2/4 (10K chars)..."`
+- `"Compressing images (3/5)..."`
+- `"⏸ LOGIN REQUIRED"`
+- `"⚠ Using screenshot fallback"`
+- `"✓ Done: 001_doc.md"`
+
+**Final output (text only at end):**
+```markdown
+### ✓ Extraction Complete
+- Output: `001_doc.md` (8,234 chars)
+- Images: 3 processed, 2 skipped
+```
 
 ---
 
@@ -395,16 +669,22 @@ Output progress in this format during execution:
 
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 PROMPT TOO LONG = AGENT FAILURE - PREVENT AT ALL COSTS 🚨            ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  NEVER: Read file >500 lines without chunking                            ║
 ║  NEVER: Read multiple images at once                                     ║
 ║  NEVER: Read image > 300KB without compressing                           ║
 ║  NEVER: Return > 50,000 chars                                            ║
 ║                                                                           ║
-║  ALWAYS: Check size before reading                                        ║
-║  ALWAYS: Compress to 800px width                                         ║
+║  ALWAYS: Check file size/line count BEFORE reading                       ║
+║  ALWAYS: Use Read(limit: 500) for large files, chunk by chunk            ║
+║  ALWAYS: Summarize each chunk before reading next                        ║
+║  ALWAYS: Compress images to 800px width, <300KB                          ║
 ║  ALWAYS: Process one item at a time                                      ║
-║  ALWAYS: Convert image to text immediately                               ║
-║  ALWAYS: Output progress in single-line format                           ║
+║  ALWAYS: Convert image to text immediately, release from context         ║
 ║                                                                           ║
+║  CHUNKING: wc -l → if >500 → Read(limit:500) → summarize → next chunk   ║
 ║  COMPRESSION: "${CLAUDE_PLUGIN_ROOT}/scripts/compress-image.sh"          ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 ```

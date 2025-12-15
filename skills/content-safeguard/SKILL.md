@@ -19,16 +19,27 @@ allowed-tools: Read, Bash, Glob
 
 Prevent "Prompt Too Long" errors through size-aware content processing.
 
-## Core Principle
+## ⛔ IRON RULE: "Prompt is too long" = PLUGIN FAILURE
 
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║                         IRON RULE                                         ║
+║  🚨🚨🚨 IRON RULE: PREVENT "PROMPT IS TOO LONG" AT ALL COSTS 🚨🚨🚨      ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║                                                                           ║
-║  NEVER read content without checking size first.                          ║
-║  NEVER process multiple large items in parallel.                          ║
-║  ALWAYS use fallback chains when content exceeds limits.                  ║
+║  "Prompt is too long" error = COMPLETE PLUGIN FAILURE                    ║
+║  This is UNACCEPTABLE and must be prevented with 100% certainty.         ║
+║                                                                           ║
+║  ❌ NEVER read content without checking size first                        ║
+║  ❌ NEVER read file >500 lines without chunking                          ║
+║  ❌ NEVER read image >300KB without compressing                          ║
+║  ❌ NEVER process multiple large items in parallel                        ║
+║  ❌ NEVER use Read() without limit for unchecked files                   ║
+║                                                                           ║
+║  ✅ ALWAYS check size FIRST: wc -l or stat                               ║
+║  ✅ ALWAYS chunk large files: Read(limit: 500)                           ║
+║  ✅ ALWAYS compress large images before reading                          ║
+║  ✅ ALWAYS use fallback chains when content exceeds limits               ║
+║  ✅ ALWAYS process one item at a time, release before next               ║
 ║                                                                           ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 ```
@@ -154,6 +165,32 @@ Other agents should call this skill's patterns:
 5. Monitor cumulative output size
 ```
 
+## ⛔ Playwright Screenshot Warning
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 browser_take_screenshot EMBEDS IMAGE INTO CONTEXT 🚨                 ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  Each screenshot = large base64 image added to conversation history      ║
+║  Multiple screenshots = RAPID context explosion                          ║
+║                                                                           ║
+║  ❌ FORBIDDEN: Loop screenshots for image download                        ║
+║  ❌ FORBIDDEN: Screenshot preview modals for extraction                   ║
+║  ❌ FORBIDDEN: Multiple screenshots without necessity                     ║
+║                                                                           ║
+║  ✅ CORRECT: browser_evaluate to extract image URLs                      ║
+║  ✅ CORRECT: curl/wget to download images (no context impact)            ║
+║  ✅ CORRECT: Single screenshot for page structure only                   ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Image Download Flow (Context-Safe):**
+1. `browser_evaluate` → Extract `img[src]` URLs → Save to `images.json`
+2. `scripts/download-images.sh` → curl download (zero context impact)
+3. Process local files in subagent (isolated context)
+
 ## Quick Reference
 
 ```
@@ -161,10 +198,12 @@ Other agents should call this skill's patterns:
 ║  NEVER: Read multiple large files at once                                ║
 ║  NEVER: Read image > 300KB without compressing                           ║
 ║  NEVER: Return > 50,000 chars total                                      ║
+║  NEVER: Loop browser_take_screenshot for image extraction                ║
 ║                                                                           ║
 ║  ALWAYS: Check size before reading                                        ║
 ║  ALWAYS: Process one item, store, release                                ║
 ║  ALWAYS: Use fallback chains                                             ║
+║  ALWAYS: Use curl/wget for image downloads, not screenshots              ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 

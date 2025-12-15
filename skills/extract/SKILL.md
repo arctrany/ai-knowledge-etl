@@ -1,8 +1,8 @@
 ---
 name: Knowledge ETL Extract
 description: |-
-  Unified extraction with atomic capabilities - converts any source to pure text Markdown.
-  Supports crawling, relevance scoring, and output transformation via pluggable pipeline.
+  Unified extraction - converts any source to pure text Markdown.
+  Supports crawling, relevance scoring, and output transformation.
 
   Use this skill when:
   - Extracting content from web pages (with anti-scrape handling)
@@ -13,45 +13,60 @@ description: |-
   - Transforming content to skill, plugin, prompt, RAG formats
 
   Key capability: All operations run in isolated agent context to PREVENT overflow.
-  REUSES: plugin-dev for skill/plugin generation, internal atomic capabilities.
+  Self-contained with built-in templates. No external plugin dependencies.
 
   Triggers: "extract from url", "crawl website", "analyze image", "prompt too large",
   "extract content", "create skill from", "generate rag", "extract with depth"
-version: 3.1.0
-allowed-tools: Read, Bash, Glob, Task, AskUserQuestion
+version: 3.3.0
+allowed-tools: Read, Write, Bash, Glob, Grep, AskUserQuestion
 ---
 
 # Knowledge ETL - Extract Skill
 
-Unified extraction with **atomic capabilities** and **pluggable pipeline**.
+Unified extraction with **built-in templates** and **pluggable pipeline**.
+
+## ⛔ IRON RULE: "Prompt is too long" = PLUGIN FAILURE
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨🚨🚨 IRON RULE: PREVENT "PROMPT IS TOO LONG" AT ALL COSTS 🚨🚨🚨      ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  "Prompt is too long" error = COMPLETE PLUGIN FAILURE                    ║
+║  This is UNACCEPTABLE and must be prevented with 100% certainty.         ║
+║                                                                           ║
+║  ALL content processing MUST run in isolated subagent contexts.          ║
+║  Main context MUST NOT read any large files (snapshots, images, pages).  ║
+║                                                                           ║
+║  Key principles:                                                          ║
+║  - Main context: Playwright capture ONLY, delegate to subagents          ║
+║  - Subagents: Check size FIRST, chunk large files, compress images       ║
+║  - NEVER use Read() without checking file size first                     ║
+║  - ALWAYS use Read(limit: 500) for files >500 lines                      ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
 
 ## Architecture
 
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║                    ATOMIC CAPABILITIES ARCHITECTURE                       ║
+║                    SELF-CONTAINED ARCHITECTURE                            ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║                                                                           ║
-║  Layer 0: External Capabilities (Reused)                                 ║
-║  ────────────────────────────────────────                                 ║
-║  plugin-dev:skill-development → Generate skills                          ║
-║  plugin-dev:plugin-structure  → Generate plugins                         ║
-║  plugin-dev:skill-reviewer    → Validate skill quality                   ║
-║                                                                           ║
-║  Layer 1: Internal Atomic Capabilities                                   ║
-║  ─────────────────────────────────────                                    ║
+║  Layer 1: Internal Capabilities                                          ║
+║  ──────────────────────────────                                           ║
 ║  content-safeguard → Size limits, compression, truncation                ║
 ║  relevance-scorer  → Regex matching, topic filtering                     ║
 ║                                                                           ║
 ║  Layer 2: Extraction Agents                                              ║
 ║  ───────────────────────────                                              ║
-║  extractor         → URL/image/PDF/directory processing                  ║
-║  crawler-coord     → Multi-page crawl orchestration                      ║
+║  extractor         → LOCAL file processing (snapshot/image/PDF)          ║
 ║  crawler-summarizer→ INDEX.md and REPORT.md generation                   ║
 ║                                                                           ║
-║  Layer 3: Output Pipelines                                               ║
-║  ─────────────────────────                                                ║
-║  output-transformer → Routes to: skill, plugin, prompt, rag, docs, json  ║
+║  Layer 3: Output Pipelines (Built-in Templates)                          ║
+║  ───────────────────────────────────────────────                          ║
+║  output-transformer → skill, plugin, prompt, rag, docs, json             ║
 ║                                                                           ║
 ║  IRON RULE: Every operation in isolated context - NO overflow            ║
 ║                                                                           ║
@@ -73,13 +88,10 @@ Unified extraction with **atomic capabilities** and **pluggable pipeline**.
 | `--max-pages=N` | Maximum pages to crawl | 20 |
 | `--pipe=FORMAT` | Output format: skill, plugin, prompt, rag, docs, json | none |
 
-## Atomic Capabilities
+## Safety Limits
 
-### content-safeguard
+Reference: `config/limits.yaml`
 
-Prevents "Prompt Too Long" errors through size-aware processing.
-
-**Limits:**
 | Resource | Limit |
 |----------|-------|
 | Image | 300 KB / 800 px / 5 per session |
@@ -88,14 +100,7 @@ Prevents "Prompt Too Long" errors through size-aware processing.
 | PDF | 15 pages max |
 | Batch | 5 files at a time |
 
-**Patterns:**
-- Size check before read
-- Sequential one-by-one processing
-- Fallback chains for graceful degradation
-
-### relevance-scorer
-
-Scores content relevance using regex patterns.
+## Relevance Scoring
 
 **Topic as Regex:**
 ```
@@ -110,34 +115,30 @@ Scores content relevance using regex patterns.
 - Score 5-7: Breadth scan (BFS)
 - Score <5: Skip exploration
 
-## Delegation Strategy
-
-ALL sources delegated to agents in **isolated context**:
+## MCP Context Limitation
 
 ```
-Task(
-  subagent_type: "knowledge-etl:extractor",
-  prompt: "Extract content from: [SOURCE]..."
-)
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  MCP tools (Playwright) only work in MAIN context (commands).            ║
+║  Subagents cannot access MCP - they process LOCAL files only.            ║
+╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
-**Why agents?**
-- Playwright returns content to calling context → overflow in main
-- Agents run isolated → content stays contained
-- Files written to disk, not returned to main context
+**Execution Model:**
+1. Command (main context) captures URL via Playwright → saves locally
+2. Extractor agent (isolated) processes local snapshot files
+3. Results written to disk, not returned to main context
 
 ## Output Pipelines
 
-| Pipe | Output | Atomic Capabilities Used |
-|------|--------|--------------------------|
-| `--pipe=skill` | SKILL.md + references/ | plugin-dev:skill-development → plugin-dev:skill-reviewer |
-| `--pipe=plugin` | Full plugin structure | plugin-dev:plugin-structure → plugin-dev:skill-development → plugin-dev:plugin-validator |
-| `--pipe=prompt` | System prompt for LLMs | Direct transformation |
-| `--pipe=rag` | Chunked JSON for vector DB | content-safeguard patterns |
-| `--pipe=docs` | Documentation structure | Direct transformation |
-| `--pipe=json` | Structured JSON | Direct transformation |
-
-**Key**: skill 和 plugin 输出都复用 plugin-dev 的原子能力，确保符合 Claude Code 插件规范。
+| Pipe | Output | Template |
+|------|--------|----------|
+| `--pipe=skill` | SKILL.md + references/ | Built-in skill template |
+| `--pipe=plugin` | Full plugin structure | Built-in plugin template |
+| `--pipe=prompt` | System prompt for LLMs | Built-in prompt template |
+| `--pipe=rag` | Chunked JSON for vector DB | 500-1000 char chunks |
+| `--pipe=docs` | Documentation structure | README + reference/ |
+| `--pipe=json` | Structured JSON | knowledge.json |
 
 ## Examples
 
@@ -148,7 +149,7 @@ Task(
 # Crawl with depth and topic filter (regex)
 /knowledge-etl:extract https://api.example.com --with-depth=2 --topic="API|REST"
 
-# Crawl and generate skill (reuses plugin-dev)
+# Crawl and generate skill
 /knowledge-etl:extract https://docs.example.com --with-depth=2 --topic="API" --pipe=skill
 
 # Directory to RAG chunks
@@ -170,29 +171,43 @@ Task(
 └── output/{pipe}/       # Transformed output
 ```
 
+## ⛔ Image Extraction Rules (CRITICAL)
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 NEVER USE browser_take_screenshot FOR IMAGE DOWNLOAD 🚨              ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  Screenshot embeds image data into conversation context!                 ║
+║  Multiple screenshots = Context explosion = "Prompt is too long"         ║
+║                                                                           ║
+║  ❌ WRONG: Click preview → screenshot → loop = CONTEXT OVERFLOW          ║
+║  ✅ RIGHT: browser_evaluate → extract URLs → curl download               ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Correct Image Download Flow:**
+1. `browser_evaluate` - Extract all `img[src]` URLs from page → save to `images.json`
+2. `scripts/download-images.sh` - Batch download via curl (no context impact)
+3. Subagent processes local image files (isolated context)
+
+**Forbidden Patterns:**
+- ❌ `browser_take_screenshot` for downloading images
+- ❌ Opening preview modals for extraction
+- ❌ Looping screenshots in main context
+- ❌ Any operation that embeds images into conversation
+
 ## Error Handling
 
 | Error | Resolution |
 |-------|------------|
 | Login required | AskUserQuestion → wait for user |
-| Anti-scrape | Screenshot fallback |
+| Anti-scrape | Screenshot fallback (single page only, NOT for images) |
 | Prompt too large | Apply content-safeguard patterns |
 | Image unreadable | Mark "[cannot read image]" |
 
-## Additional Skills
-
-This plugin provides atomic capabilities for reuse:
-
-- **`content-safeguard`** - Size-aware processing patterns
-- **`relevance-scorer`** - Topic matching and link scoring
-
-## Dependencies
-
-**External (from claude-code-plugins):**
-- plugin-dev:skill-development
-- plugin-dev:plugin-structure
-- plugin-dev:skill-reviewer
-- plugin-dev:plugin-validator
+## Requirements
 
 **MCP:**
 - Playwright with persistent profile for URL extraction

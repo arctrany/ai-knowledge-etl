@@ -1,26 +1,33 @@
-name: web-knowledge-extractor
-version: 1.0.0
+name: knowledge-etl
+version: 3.3.0
 description: >
-  Extract knowledge from web pages by leveraging your existing browser sessions.
-  Supports reusing user login state, screenshot capture, and content extraction
-  to specified output directories.
+  Extract-Transform-Load pipeline for knowledge extraction.
+  URLs, images, PDFs, directories, git repos → pure text Markdown.
+  Supports crawling with depth, relevance scoring, and output transformation
+  to skill, plugin, prompt, RAG formats.
 author: haowu
 license: MIT
 
 components:
   skills:
-    - web-extractor
+    - extract
   commands:
     - extract
-    - screenshot
+  agents:
+    - extractor
+    - crawler-coordinator
+    - crawler-summarizer
+    - output-transformer
 
 keywords:
   - browser
   - web scraping
   - knowledge extraction
-  - screenshot
   - content extraction
   - playwright
+  - crawl
+  - rag
+  - skill generation
 
 dependencies:
   mcp:

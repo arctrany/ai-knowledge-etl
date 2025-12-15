@@ -1,8 +1,16 @@
 ---
-name: "knowledge-etl:extract"
 description: Extract content from URL, images, PDF, directory, or git repo - with optional crawling and output transformation
-category: Knowledge ETL
-tags: [extract, web, crawl, images, pdf, directory, git, skill, plugin, rag]
+allowed-tools:
+  - mcp__plugin_knowledge-etl_playwright__browser_navigate
+  - mcp__plugin_knowledge-etl_playwright__browser_wait_for
+  - mcp__plugin_knowledge-etl_playwright__browser_snapshot
+  # ⛔ browser_take_screenshot REMOVED - embeds image into context causing overflow!
+  - mcp__plugin_knowledge-etl_playwright__browser_close
+  - mcp__plugin_knowledge-etl_playwright__browser_click
+  - mcp__plugin_knowledge-etl_playwright__browser_type
+  - mcp__plugin_knowledge-etl_playwright__browser_scroll
+  - mcp__plugin_knowledge-etl_playwright__browser_evaluate
+  - mcp__plugin_knowledge-etl_playwright__browser_press_key
 arguments:
   - name: source
     description: URL, image path, glob pattern, PDF path, directory, or git URL
@@ -22,6 +30,15 @@ arguments:
   - name: --output-dir
     description: "Output directory (default: .knowledge-etl). Example: --output-dir=./my-output"
     required: false
+  - name: --engine
+    description: "Extraction engine: auto (default), playwright, jina, trafilatura. See config/security.yaml for routing rules"
+    required: false
+  - name: --with-images
+    description: "Extract and analyze images (default: false). Increases processing time"
+    required: false
+  - name: --compact-cph
+    description: "Compact Chain of Thought - reduce verbose progress output, only show essential status"
+    required: false
 ---
 
 # Knowledge ETL Extract Command
@@ -30,12 +47,142 @@ Unified extraction that converts **any content source to pure text Markdown**. S
 
 ---
 
-## STEP 0: Task Analysis & Plan Output (REQUIRED)
+## ⛔ CRITICAL: MAIN CONTEXT SAFETY RULES
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 PROMPT TOO LONG = PLUGIN FAILURE - 100% PREVENTION REQUIRED 🚨        ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  ⛔⛔⛔ ABSOLUTELY FORBIDDEN IN MAIN CONTEXT ⛔⛔⛔                        ║
+║                                                                           ║
+║  ❌ browser_take_screenshot - EMBEDS IMAGE INTO CONTEXT!                 ║
+║     Even ONE screenshot can cause overflow. NEVER use it.                ║
+║     Tool has been REMOVED from allowed-tools list.                       ║
+║                                                                           ║
+║  ❌ Read(snapshot.md) - could be 500KB+                                   ║
+║  ❌ Read(screenshot.png) - could be 2MB+                                  ║
+║  ❌ Read any captured content file                                        ║
+║  ❌ Read any user-provided large file                                     ║
+║                                                                           ║
+║  ONLY allowed in MAIN context:                                           ║
+║  ✅ browser_snapshot - TEXT only, saves to file, no context impact       ║
+║  ✅ browser_evaluate - extract data as text/JSON                         ║
+║  ✅ browser_navigate, wait_for, click, close - navigation only           ║
+║  ✅ Bash: stat, head -n 10, wc -l (size/preview only)                    ║
+║  ✅ Bash: curl for image download (no context impact)                    ║
+║  ✅ Task(subagent) - delegate ALL content reading                        ║
+║                                                                           ║
+║  ALL content processing → Task(extractor) in isolated context            ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+---
+
+## STEP 0: Engine Selection & Security Check (REQUIRED)
+
+**Reference**: `config/security.yaml` for URL routing rules.
+
+### Engine Selection Logic
+
+```bash
+# Determine extraction engine based on URL and --engine flag
+
+select_engine() {
+  local url="$1"
+  local requested_engine="${2:-auto}"
+
+  # Extract domain from URL
+  domain=$(echo "$url" | sed -E 's|https?://([^/]+).*|\1|')
+
+  # ─────────────────────────────────────────────────────────────────
+  # SECURITY CHECK: Force local for internal/sensitive URLs
+  # ─────────────────────────────────────────────────────────────────
+
+  # Internal domains (from security.yaml)
+  INTERNAL_PATTERNS=(
+    "*.alibaba-inc.com"
+    "alidocs.dingtalk.com"
+    "*.yuque.com"
+  )
+
+  # Private networks
+  PRIVATE_PATTERNS=(
+    "localhost" "127.0.0.1" "::1"
+    "10.*" "192.168.*" "172.16.*" "172.17.*" "172.18.*" "172.19.*"
+    "172.20.*" "172.21.*" "172.22.*" "172.23.*" "172.24.*" "172.25.*"
+    "172.26.*" "172.27.*" "172.28.*" "172.29.*" "172.30.*" "172.31.*"
+  )
+
+  # Sensitive URL patterns
+  SENSITIVE_PATTERNS=(
+    "*login*" "*signin*" "*auth*" "*oauth*" "*sso*"
+    "*admin*" "*dashboard*" "*internal*" "*intranet*"
+  )
+
+  # Check if URL matches any force_local pattern
+  for pattern in "${INTERNAL_PATTERNS[@]}" "${PRIVATE_PATTERNS[@]}"; do
+    if [[ "$domain" == $pattern ]]; then
+      echo "playwright"  # Force local
+      return
+    fi
+  done
+
+  for pattern in "${SENSITIVE_PATTERNS[@]}"; do
+    if [[ "$url" == $pattern ]]; then
+      echo "playwright"  # Force local
+      return
+    fi
+  done
+
+  # ─────────────────────────────────────────────────────────────────
+  # USER REQUESTED ENGINE
+  # ─────────────────────────────────────────────────────────────────
+  case "$requested_engine" in
+    playwright|jina|trafilatura)
+      echo "$requested_engine"
+      ;;
+    auto)
+      # Default to playwright (safest)
+      # Can try jina for public URLs if configured
+      echo "playwright"
+      ;;
+    *)
+      echo "playwright"
+      ;;
+  esac
+}
+```
+
+### Engine Capabilities
+
+| Engine | 速度 | 登录支持 | 图片提取 | 隐私安全 | 适用场景 |
+|--------|------|----------|----------|----------|----------|
+| **playwright** | 慢 | ✅ | ✅ | ✅ 本地 | 内部系统、需登录 |
+| **jina** | 快 | ❌ | ⚠️ URL | ❌ 第三方 | 公开文档 |
+| **trafilatura** | 中 | ❌ | ❌ | ✅ 本地 | 公开文章 |
+
+### Security Output
+
+```
+┌─ SECURITY ──────────────────────────────────────┐
+│ URL:    alidocs.dingtalk.com/...               │
+│ Domain: alidocs.dingtalk.com                   │
+│ Match:  internal_domains                       │
+│ Engine: playwright (forced local)              │
+└────────────────────────────────────────────────┘
+```
+
+---
+
+## STEP 1: Task Analysis & Plan Output (REQUIRED)
 
 **Before executing, analyze the task complexity and output a plan:**
 
 ```
 ┌─ PLAN ─────────────────────────────────────────┐
+│ Engine:      {playwright|jina|trafilatura}     │
 │ 1. Extract   → {what}                          │
 │ 2. Process   → {what} ║ {parallel}             │
 │ 3. Transform → {pipe} (if specified)           │
@@ -56,29 +203,40 @@ Unified extraction that converts **any content source to pure text Markdown**. S
 
 ### Plan Examples
 
-**Simple (single page):**
+**Simple (single page - internal):**
 ```
 ┌─ PLAN ─────────────────────────────────────────┐
+│ Engine:      playwright (forced: internal)     │
 │ 1. Extract   → capture page snapshot           │
+└────────────────────────────────────────────────┘
+```
+
+**Simple (single page - public with jina):**
+```
+┌─ PLAN ─────────────────────────────────────────┐
+│ Engine:      jina (public URL)                 │
+│ 1. Extract   → curl r.jina.ai/{url}            │
 └────────────────────────────────────────────────┘
 ```
 
 **Medium (single page + skill):**
 ```
 ┌─ PLAN ─────────────────────────────────────────┐
+│ Engine:      playwright                        │
 │ 1. Extract   → capture page                    │
-│ 2. Transform → skill (plugin-dev)              │
-│ 3. Validate  → skill-reviewer                  │
+│ 2. Transform → skill (built-in template)       │
+│ 3. Validate  → self-check output size          │
 └────────────────────────────────────────────────┘
 ```
 
 **Complex (crawl + skill):**
 ```
 ┌─ PLAN ─────────────────────────────────────────┐
+│ Engine:      playwright                        │
 │ 1. Crawl     → depth:2 max:20 topic-filter     │
 │ 2. Summarize → INDEX.md + REPORT.md            │
-│ 3. Transform → skill (plugin-dev)              │
-│ 4. Validate  → skill-reviewer                  │
+│ 3. Transform → skill (built-in template)       │
+│ 4. Validate  → self-check output size          │
 └────────────────────────────────────────────────┘
 ```
 
@@ -94,22 +252,73 @@ Unified extraction that converts **any content source to pure text Markdown**. S
 
 ---
 
-## Progress Output During Execution
-
-Output progress in this format:
+## Progress Output During Execution (USE TodoWrite)
 
 ```
-[1/4 Extract]   ████░░░░░░ 40% | snapshot.md (12K chars)
-[2/4 Process]   ██████░░░░ 60% | ║ clean ✓ ║ compress... ║
-[3/4 Transform] ████████░░ 80% | SKILL.md + 2 refs...
-[4/4 Validate]  ██████████ 100% ✓ passed
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 USE TodoWrite FOR PROGRESS - NEVER TEXT OUTPUT 🚨                    ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  ❌ WRONG: print "[Extract] ██░░░░░░░░ 20% | page loaded"                ║
+║  ❌ WRONG: Output text after each step (causes context overflow!)        ║
+║                                                                           ║
+║  ✅ RIGHT: Use TodoWrite to update task status                           ║
+║  ✅ RIGHT: TodoWrite renders in UI statusline (persistent, no context)   ║
+║                                                                           ║
+║  WHY: Text output accumulates → "Prompt is too long" error               ║
+║       TodoWrite UI updates → Zero context growth                         ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
-**Rules:**
-- One line per major step
-- `...` = in progress, `✓` = done, `⚠` = warning
-- `║` separates parallel tasks
-- Only key info: filename, size, ratio
+**TodoWrite Usage Pattern:**
+
+```javascript
+// STEP 1: Initialize at start
+TodoWrite({
+  todos: [
+    { content: "Extract page content", status: "in_progress", activeForm: "Navigating to URL..." },
+    { content: "Process images", status: "pending", activeForm: "Processing images" },
+    { content: "Transform output", status: "pending", activeForm: "Transforming output" },
+    { content: "Validate results", status: "pending", activeForm: "Validating results" }
+  ]
+})
+
+// STEP 2: Update activeForm during work
+// After navigate:
+TodoWrite({ todos: [
+  { content: "Extract page content", status: "in_progress", activeForm: "Page loaded, capturing snapshot..." },
+  ...
+]})
+
+// After snapshot:
+TodoWrite({ todos: [
+  { content: "Extract page content", status: "in_progress", activeForm: "Snapshot captured (12K chars)" },
+  ...
+]})
+
+// STEP 3: Mark complete, start next
+TodoWrite({ todos: [
+  { content: "Extract page content", status: "completed", activeForm: "Extracted page content" },
+  { content: "Process images", status: "in_progress", activeForm: "Downloading images (3/5)..." },
+  ...
+]})
+```
+
+**activeForm Examples:**
+- `"Navigating to URL..."` → `"Page loaded, waiting..."` → `"Capturing snapshot..."`
+- `"Downloading images (2/5)..."` → `"Compressing (1.2MB→280KB)..."`
+- `"⏸ LOGIN REQUIRED - complete in browser"`
+- `"⚠ Anti-scrape detected, using screenshot"`
+- `"✓ Done: extracted.md (8K chars)"`
+
+**Final Summary (text output only at completion):**
+```markdown
+### ✓ Extraction Complete
+- Output: `.knowledge-etl/extracted.md` (8,234 chars)
+- Images: 5 processed, 2 skipped
+- Time: 15.2s
+```
 
 ---
 
@@ -166,7 +375,60 @@ Output progress in this format:
 
 ## Execution
 
-### For URLs (http/https)
+### Engine Dispatch (STEP 2)
+
+Based on STEP 0 security check, dispatch to appropriate engine:
+
+```
+┌─ ENGINE DISPATCH ────────────────────────────────────────────────┐
+│                                                                   │
+│  engine = "playwright" (default/internal)                         │
+│  ├── Use Playwright MCP for full browser automation             │
+│  ├── Supports: login, JS rendering, images, cookies             │
+│  └── See: "For URLs (playwright)" section below                  │
+│                                                                   │
+│  engine = "jina" (public URLs only)                               │
+│  ├── Fast: Single curl call to r.jina.ai                         │
+│  ├── Clean: Returns pure Markdown directly                       │
+│  ├── Script: scripts/extract-jina.sh                             │
+│  └── Usage:                                                       │
+│      Bash: "${CLAUDE_PLUGIN_ROOT}/scripts/extract-jina.sh"       │
+│            "{URL}" "{OUTPUT_DIR}"                                 │
+│                                                                   │
+│  engine = "trafilatura" (local, no JS)                            │
+│  ├── Local: No external API calls                                │
+│  ├── Script: scripts/extract-trafilatura.sh                      │
+│  └── Usage:                                                       │
+│      Bash: "${CLAUDE_PLUGIN_ROOT}/scripts/extract-trafilatura.sh"│
+│            "{URL}" "{OUTPUT_DIR}"                                 │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Jina Engine Example:**
+```bash
+# For public URLs - fast extraction
+Bash("${CLAUDE_PLUGIN_ROOT}/scripts/extract-jina.sh" \
+     "https://docs.python.org/3/library/json.html" \
+     ".knowledge-etl/python-json")
+
+# Output: .knowledge-etl/python-json/docs_python_org_3_library_json_html.md
+```
+
+**Security Block Example:**
+```bash
+# Internal URL → Script will exit with error code 2
+Bash("${CLAUDE_PLUGIN_ROOT}/scripts/extract-jina.sh" \
+     "https://alidocs.dingtalk.com/..." \
+     ".knowledge-etl/")
+
+# Output: [error] Security: alidocs.dingtalk.com is an internal domain.
+# Action: Fall back to playwright engine
+```
+
+---
+
+### For URLs (playwright engine)
 
 ```
 ╔════════════════════════════════════════════════════════════════════════════╗
@@ -177,24 +439,124 @@ Output progress in this format:
 ╚════════════════════════════════════════════════════════════════════════════╝
 ```
 
-**Step-by-step execution (2-phase):**
+**Step-by-step execution (3-phase):**
 
 ```
-PHASE 1: MAIN CONTEXT - Capture URL content
-─────────────────────────────────────────────
+PHASE 1: MAIN CONTEXT - Capture URL content + Extract Images
+─────────────────────────────────────────────────────────────
 Execute Playwright in main context (MCP tools available here):
 
+Step 1.1: Navigate and capture page (TEXT ONLY - NO SCREENSHOT!)
+─────────────────────────────────────────────────────────────────
 1. mcp__playwright__browser_navigate(url: "{URL}")
 2. mcp__playwright__browser_wait_for(time: 3)
-3. mcp__playwright__browser_snapshot(filename: "snapshot.md")
-4. mcp__playwright__browser_take_screenshot(filename: "screenshot.png")
-5. mcp__playwright__browser_close()
+3. mcp__playwright__browser_press_key(key: "End")  # Trigger lazy-load
+4. mcp__playwright__browser_wait_for(time: 2)
+5. mcp__playwright__browser_snapshot(filename: "snapshot.md")
+# ⛔ NO browser_take_screenshot - it embeds image into context!
 
-Check for login:
-- Read .playwright-mcp/snapshot.md
-- If login detected (登录, login, password, SSO):
+Step 1.2: Check for login (NEVER read full file!)
+──────────────────────────────────────────────────
+- Use Bash to check first 10 lines ONLY:
+  head -n 10 .playwright-mcp/snapshot.md | grep -iE "登录|login|password|SSO|sign.?in"
+- If login detected:
   - AskUserQuestion: "请在浏览器中完成登录"
   - Re-capture after user confirms
+
+Step 1.3: Extract image URLs from page (NEW)
+────────────────────────────────────────────
+Use browser_evaluate to get image URLs with filtering:
+
+mcp__playwright__browser_evaluate({
+  function: "() => {
+    const imgs = Array.from(document.querySelectorAll('img'));
+    return imgs
+      .filter(img => {
+        // Filter out decorative images
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (w < 100 || h < 100) return false;
+
+        const src = (img.src || '').toLowerCase();
+        const alt = (img.alt || '').toLowerCase();
+
+        // Skip icons, logos, avatars
+        const skipPatterns = ['icon', 'logo', 'avatar', 'emoji', 'button', 'arrow'];
+        if (skipPatterns.some(p => src.includes(p) || alt.includes(p))) return false;
+
+        return true;
+      })
+      .slice(0, 5)  // Max 5 images
+      .map((img, i) => ({
+        index: i,
+        src: img.src,
+        alt: img.alt || '',
+        width: img.naturalWidth || img.width,
+        height: img.naturalHeight || img.height
+      }));
+  }"
+})
+
+→ Write result to: .playwright-mcp/images.json (using Bash echo)
+
+Step 1.4: Download images (CONTEXT-SAFE METHOD)
+────────────────────────────────────────────────
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 NEVER USE browser_take_screenshot IN A LOOP FOR IMAGE DOWNLOAD 🚨    ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  Each screenshot embeds image data into conversation context!            ║
+║  Multiple screenshots = RAPID context explosion = "Prompt is too long"   ║
+║                                                                           ║
+║  ❌ DEPRECATED: Click-to-preview screenshot loop                         ║
+║  ✅ CORRECT: browser_evaluate + curl download (zero context impact)      ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+Download images using curl (ONLY correct method)
+─────────────────────────────────────────────────
+# Get cookies for authenticated image download
+mcp__playwright__browser_evaluate({
+  function: "() => document.cookie"
+})
+→ Store as $COOKIES
+
+# Download images in parallel (Bash)
+for each image in images.json:
+  curl -s -L \
+    -H "Cookie: $COOKIES" \
+    -H "Referer: {URL}" \
+    -H "User-Agent: Mozilla/5.0..." \
+    --max-time 10 \
+    -o ".playwright-mcp/img_{index}.jpg" \
+    "{image.src}" &
+wait  # Wait for all downloads
+
+# Verify downloads - skip invalid files (don't use screenshot fallback!)
+for img in .playwright-mcp/img_*.jpg:
+  # Check if file is actually an image or an error page
+  file_type=$(file -b "$img" | head -c 10)
+  if [[ "$file_type" != "JPEG"* && "$file_type" != "PNG"* && "$file_type" != "WebP"* ]]; then
+    echo "[Extract] ⚠ download failed for $img, skipping (auth-protected)"
+    rm -f "$img"  # Remove invalid file
+    # NOTE: Do NOT use screenshot fallback - causes context overflow!
+  fi
+
+# Compress large images
+for img in .playwright-mcp/img_*.jpg:
+  SIZE=$(stat -f%z "$img" 2>/dev/null || stat -c%s "$img" 2>/dev/null || echo "0")
+  if [ "$SIZE" -gt 300000 ]; then
+    "${CLAUDE_PLUGIN_ROOT}/scripts/compress-image.sh" "$img" "$img" 800
+  fi
+
+print "[Extract] ████████░░ 80% | images captured"
+
+Step 1.5: Close browser
+───────────────────────
+mcp__playwright__browser_close()
 
 PHASE 2: SUBAGENT - Process local files (isolated context)
 ───────────────────────────────────────────────────────────
@@ -206,15 +568,41 @@ Task(
     Process captured content from: {URL}
 
     Local files available:
-    - .playwright-mcp/snapshot.md
-    - .playwright-mcp/screenshot.png
+    - .playwright-mcp/snapshot.md (text content)
+    - .playwright-mcp/screenshot.png (visual fallback)
+    - .playwright-mcp/images.json (image metadata)
+    - .playwright-mcp/img_*.jpg (downloaded page images, pre-compressed)
+
+    ⚠️ EXTRACTION PRIORITY:
+    Snapshot FIRST (text) → Screenshot FALLBACK ONLY (when blocked)
 
     Steps:
-    1. Read snapshot.md first (text is lighter)
-    2. If insufficient, compress and read screenshot
-    3. Extract text content
-    4. Describe images as text
-    5. Write output to: {output_dir}/pages/001_{slug}.md
+    1. Read snapshot.md FIRST (chunk if >500 lines)
+    2. Read images.json for image metadata
+    3. For each img_*.jpg (if exists):
+       a. Check size (<300KB required)
+       b. Read ONE image at a time
+       c. Describe image (type + content)
+       d. Release from context before next image
+    4. Combine: text content + image descriptions
+    5. Write output to: {output_dir}/extracted.md
+
+    Output format:
+    ---
+    source: {URL}
+    title: {extracted_title}
+    stats:
+      chars: {count}
+      images: {processed_count}
+    ---
+
+    {text_content}
+
+    ---
+    **[Image 1: {alt or description}]**
+    Type: {flowchart|architecture|screenshot|chart}
+    {detailed_visual_description}
+    ---
 
     Follow safety limits strictly.
   """
@@ -391,15 +779,15 @@ while queue not empty AND page_id < max_pages:
 
   page_id += 1
 
-  # 2b. Capture URL using Playwright (MCP tools available here)
+  # 2b. Capture URL using Playwright (TEXT SNAPSHOT ONLY!)
   mcp__playwright__browser_navigate(url: url)
   mcp__playwright__browser_wait_for(time: 3)
   mcp__playwright__browser_snapshot(filename: "page_{page_id}.md")
-  mcp__playwright__browser_take_screenshot(filename: "page_{page_id}.png")
+  # ⛔ NO browser_take_screenshot - causes context overflow!
 
-  # Check for login
-  snapshot = Read(".playwright-mcp/page_{page_id}.md", limit: 50)
-  if login_detected(snapshot):
+  # Check for login (NEVER Read full file - use Bash head only!)
+  # Bash: head -n 10 .playwright-mcp/page_{page_id}.md | grep -iE "登录|login|password|SSO"
+  if login_detected:
     AskUserQuestion("请在浏览器中完成登录")
     # Re-capture after login
 

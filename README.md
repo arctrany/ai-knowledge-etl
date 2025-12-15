@@ -68,6 +68,70 @@ claude plugin install --git https://github.com/arctrany/ai-knowledge-etl.git
 /knowledge-etl:extract ./document.pdf
 ```
 
+### 命令参数
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `source` | **必填** - URL/图片/PDF/目录 | `https://docs.example.com` |
+| `--engine` | 提取引擎: auto, playwright, jina, trafilatura | `--engine=jina` |
+| `--with-images` | 提取并分析图片 (默认关闭) | `--with-images` |
+| `--with-depth` | 启用爬取并指定深度(1-3) | `--with-depth=2` |
+| `--topic` | 主题正则表达式过滤 | `--topic="API\|接口"` |
+| `--max-pages` | 最大爬取页数 (默认20，最大50) | `--max-pages=30` |
+| `--pipe` | 输出格式: skill, plugin, prompt, rag, docs, json | `--pipe=skill` |
+| `--output-dir` | 输出目录 (默认 .knowledge-etl) | `--output-dir=./docs` |
+| `--compact-cph` | 压缩进度输出 | `--compact-cph` |
+
+### 使用示例
+
+```bash
+# 单页提取（公开文档，使用 jina 快速提取）
+/knowledge-etl:extract https://docs.python.org/3/library/json.html --engine=jina
+
+# 单页提取（内部文档，自动使用 playwright）
+/knowledge-etl:extract https://alidocs.dingtalk.com/xxx
+
+# 带图片的页面提取
+/knowledge-etl:extract https://docs.example.com/architecture --with-images
+
+# 深度爬取并转换为 Skill
+/knowledge-etl:extract https://api.example.com/docs --with-depth=2 --topic="API|接口" --pipe=skill
+
+# 深度爬取生成 RAG 知识库
+/knowledge-etl:extract https://docs.example.com --with-depth=3 --max-pages=50 --pipe=rag
+
+# 本地图片分析
+/knowledge-etl:extract ./screenshot.png
+
+# 批量图片处理
+/knowledge-etl:extract "./docs/*.png"
+
+# PDF 提取
+/knowledge-etl:extract ./document.pdf
+```
+
+### 输出格式 (--pipe)
+
+| 格式 | 说明 | 输出位置 |
+|------|------|----------|
+| (不指定) | 纯 Markdown 文本 | `.knowledge-etl/extracted.md` |
+| `skill` | Claude Code Skill | `output/skill/SKILL.md` |
+| `plugin` | Claude Code Plugin 结构 | `output/plugin/` |
+| `prompt` | LLM 系统提示词 | `output/prompt/system-prompt.md` |
+| `rag` | RAG 友好的分块 JSON | `output/rag/chunks/*.json` |
+| `docs` | 文档结构 | `output/docs/` |
+| `json` | 结构化 JSON 知识库 | `output/json/knowledge.json` |
+
+### 引擎选择
+
+| 引擎 | 速度 | 登录 | 图片 | 隐私 | 适用场景 |
+|------|------|------|------|------|----------|
+| **playwright** | 慢 | ✅ | ✅ | ✅ 本地 | 内部系统、需登录 |
+| **jina** | 快 | ❌ | ⚠️ | ❌ 第三方 | 公开文档 |
+| **trafilatura** | 中 | ❌ | ❌ | ✅ 本地 | 公开文章 |
+
+> **安全说明**: 内部域名 (如 `alidocs.dingtalk.com`) 会强制使用本地引擎，不会发送到外部 API。详见 `config/security.yaml`。
+
 ### 输出示例
 
 ```markdown
@@ -95,6 +159,47 @@ extracted_at: 2025-12-12T21:30:00+08:00
 
 ...后续文本内容...
 ```
+
+## 防止 "Prompt Too Long" 机制
+
+### 分层防护架构
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🛡️ 四层防护：确保任意规模内容都不会导致上下文溢出                         ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  Layer 1: 配置层 (config/limits.yaml)                                    ║
+║  ├── transform.max_input_chars: 30000 (直接读取上限)                     ║
+║  ├── transform.use_index_only_threshold: 10 (>10页只读索引)              ║
+║  └── transform.summary_per_page_chars: 500 (每页摘要限制)                ║
+║                                                                           ║
+║  Layer 2: 提取层 (extractor)                                             ║
+║  ├── 每页同时生成 .summary 文件 (500字符)                                ║
+║  └── 输出: pages/001.md + pages/001.summary                              ║
+║                                                                           ║
+║  Layer 3: 汇总层 (crawler-summarizer)                                    ║
+║  ├── 优先读取 .summary 文件                                              ║
+║  ├── 无摘要时只读 frontmatter (前20行)                                   ║
+║  └── 只对 top 3 高相关页读取完整内容                                     ║
+║                                                                           ║
+║  Layer 4: 转换层 (output-transformer)                                    ║
+║  ├── 强制预检：统计页数和内容大小                                        ║
+║  └── 三级策略：                                                          ║
+║      • 页数 ≤5 且 <30K → direct (直接读取)                               ║
+║      • 页数 6-10 或 >30K → summarize_first (先摘要)                      ║
+║      • 页数 >10 → index_only (只读索引)                                  ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+### Transform 策略路由
+
+| 条件 | 策略 | 上下文影响 |
+|------|------|-----------|
+| 页数 ≤5 且 内容 <30K | `direct` - 直接读取 REPORT.md | ~30K chars |
+| 页数 6-10 或 内容 >30K | `summarize_first` - 先生成摘要再转换 | ~15K chars |
+| 页数 >10 | `index_only` - 只读 INDEX.md | ~5K chars |
 
 ## 工作原理
 

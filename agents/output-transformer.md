@@ -10,8 +10,7 @@ description: |
   - Need to generate plugin structure (--pipe=plugin)
   - Need to create documentation (--pipe=docs)
 
-  Key capability: Takes any extracted content and transforms to specified format.
-  REUSES plugin-dev for skill/plugin generation - does NOT reinvent the wheel.
+  Key capability: Self-contained with built-in templates. No external dependencies.
 
   Pipeline: [Raw Source] → [Extractor] → [Raw Data] → [Transformer] → [Formatted Output]
 model: sonnet
@@ -20,36 +19,11 @@ tools:
   - Write
   - Glob
   - Bash
-  - Skill     # For invoking plugin-dev:skill-development
-  - Task      # For invoking plugin-dev agents
 ---
 
 # Output Transformer Agent
 
-Transform extracted content into various formats, **reusing existing atomic capabilities**.
-
----
-
-## Core Principle: Reuse Atomic Capabilities
-
-```
-╔═══════════════════════════════════════════════════════════════════════════╗
-║                    REUSE > REINVENT                                       ║
-╠═══════════════════════════════════════════════════════════════════════════╣
-║                                                                           ║
-║  For --pipe=skill:                                                        ║
-║    → Use plugin-dev:skill-development skill                              ║
-║    → Use plugin-dev:skill-reviewer agent for validation                  ║
-║                                                                           ║
-║  For --pipe=plugin:                                                       ║
-║    → Use plugin-dev:plugin-structure skill                               ║
-║    → Use plugin-dev:plugin-validator agent for validation                ║
-║                                                                           ║
-║  For --pipe=rag:                                                         ║
-║    → Use content-safeguard patterns for chunking                         ║
-║                                                                           ║
-╚═══════════════════════════════════════════════════════════════════════════╝
-```
+Transform extracted content into various formats using **built-in templates**.
 
 ---
 
@@ -66,158 +40,272 @@ description: Optional description
 
 ---
 
+## ⛔ PRE-CHECK: Content Size Detection (MANDATORY FIRST STEP)
+
+**Reference**: `config/limits.yaml` transform section for limits.
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 CHECK INPUT SIZE BEFORE READING ANYTHING 🚨                           ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  Large crawls can produce 400KB+ content → Reading all = OVERFLOW!        ║
+║                                                                           ║
+║  STEP 1: Count pages                                                      ║
+║  ─────────────────────                                                    ║
+║  page_count = $(ls -1 {source_dir}/pages/*.md 2>/dev/null | wc -l)       ║
+║                                                                           ║
+║  STEP 2: Route by page count                                              ║
+║  ────────────────────────────                                             ║
+║  Pages ≤ 5  → SAFE: Read REPORT.md directly                              ║
+║  Pages 6-10 → SUMMARY: Generate summaries first, then transform          ║
+║  Pages > 10 → INDEX ONLY: Read INDEX.md only, never read pages           ║
+║                                                                           ║
+║  STEP 3: Check content size                                               ║
+║  ──────────────────────────                                               ║
+║  total_chars = $(wc -c {source_dir}/REPORT.md | awk '{print $1}')        ║
+║                                                                           ║
+║  total_chars ≤ 30,000 → SAFE: Read directly                              ║
+║  total_chars > 30,000 → CHUNK: Read in 500-line chunks, summarize each   ║
+║  total_chars > 50,000 → INDEX ONLY: Never read full content              ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+### Size Check Implementation
+
+```bash
+# STEP 1: Count pages
+PAGE_COUNT=$(ls -1 "${SOURCE_DIR}/pages/"*.md 2>/dev/null | wc -l | tr -d ' ')
+echo "[Transform] Page count: ${PAGE_COUNT}"
+
+# STEP 2: Check REPORT.md size
+if [ -f "${SOURCE_DIR}/REPORT.md" ]; then
+  REPORT_SIZE=$(wc -c < "${SOURCE_DIR}/REPORT.md" | tr -d ' ')
+  REPORT_LINES=$(wc -l < "${SOURCE_DIR}/REPORT.md" | tr -d ' ')
+else
+  # Single page extraction - check extracted.md
+  REPORT_SIZE=$(wc -c < "${SOURCE_DIR}/extracted.md" 2>/dev/null | tr -d ' ' || echo "0")
+  REPORT_LINES=$(wc -l < "${SOURCE_DIR}/extracted.md" 2>/dev/null | tr -d ' ' || echo "0")
+fi
+
+echo "[Transform] Content size: ${REPORT_SIZE} chars, ${REPORT_LINES} lines"
+
+# STEP 3: Determine strategy
+if [ "${PAGE_COUNT}" -gt 10 ]; then
+  STRATEGY="index_only"
+  echo "[Transform] ⚠ Pages > 10: Using INDEX.md only (safe mode)"
+elif [ "${PAGE_COUNT}" -gt 5 ] || [ "${REPORT_SIZE}" -gt 30000 ]; then
+  STRATEGY="summarize_first"
+  echo "[Transform] ⚠ Large content: Will generate summaries first"
+else
+  STRATEGY="direct"
+  echo "[Transform] ✓ Content size OK: Direct read"
+fi
+```
+
+### Strategy Execution
+
+| Strategy | Action | Max Context Impact |
+|----------|--------|-------------------|
+| `direct` | Read REPORT.md directly | ~30K chars |
+| `summarize_first` | Read INDEX.md → For each page, read & summarize (500 chars each) → Combine | ~15K chars |
+| `index_only` | Read INDEX.md only, extract titles and structure | ~5K chars |
+
+### Summary Generation (for `summarize_first` strategy)
+
+```bash
+# For each page, generate 500-char summary
+for page in "${SOURCE_DIR}/pages/"*.md; do
+  PAGE_NAME=$(basename "$page")
+
+  # Read first 200 lines only
+  Read("$page", limit: 200)
+
+  # Generate summary (max 500 chars)
+  SUMMARY="..." # LLM generates summary
+
+  # Append to combined summaries
+  echo "### ${PAGE_NAME}\n${SUMMARY}\n" >> "${SOURCE_DIR}/summaries.md"
+done
+
+# Use summaries.md for transformation (not full pages)
+```
+
+---
+
 ## 2. Transformation Routes
 
-### 2.1 --pipe=skill (Delegate to plugin-dev)
+### 2.1 --pipe=skill
 
-**DO NOT manually create skill structure.** Instead:
+Generate Claude Code Skill using built-in template.
 
-1. **Prepare knowledge summary** from extracted content:
-   - Read REPORT.md or INDEX.md
-   - Extract key concepts, examples, triggers
-   - Format as structured knowledge
-
-2. **Invoke plugin-dev skill-development**:
-   ```
-   Skill(skill: "plugin-dev:skill-development")
-   ```
-   Then provide the extracted knowledge for skill creation.
-
-3. **Validate with skill-reviewer**:
-   ```
-   Task(
-     subagent_type: "plugin-dev:skill-reviewer",
-     prompt: "Review the skill at {output_dir}/skill/ and ensure it follows best practices"
-   )
-   ```
-
-**Output structure** (created by plugin-dev):
+**Step 1: Read source content**
 ```
-output/skill/
-├── SKILL.md       # Skill content with frontmatter
-└── references/    # Optional detailed references
+Read REPORT.md (or single page content)
+Extract: title, key concepts, use cases, examples
 ```
 
-### 2.2 --pipe=plugin (Delegate to plugin-dev)
+**Step 2: Generate SKILL.md**
 
-**DO NOT manually create plugin structure.** Instead:
+```markdown
+---
+name: {topic}
+description: |
+  {one-line description}
 
-1. **Prepare knowledge summary** from extracted content:
-   - Read REPORT.md or extracted pages
-   - Identify plugin name, description, components needed
-   - Determine what skills, commands, agents, hooks are appropriate
-   - Format as structured knowledge for plugin creation
+  Use this skill when:
+  - {trigger_1}
+  - {trigger_2}
+  - {trigger_3}
 
-2. **Invoke plugin-dev plugin-structure skill**:
-   ```
-   Skill(skill: "plugin-dev:plugin-structure")
-   ```
-   Then provide the extracted knowledge for plugin scaffolding.
+version: 1.0.0
+source: {source_url}
+generated_at: {timestamp}
+---
 
-   The plugin-structure skill will guide creation of:
-   - `.claude-plugin/plugin.json` manifest
-   - Directory structure (skills/, commands/, agents/, hooks/)
-   - README.md documentation
+# {Topic} Knowledge Base
 
-3. **Create skills using plugin-dev:skill-development**:
-   For each skill needed in the plugin:
-   ```
-   Skill(skill: "plugin-dev:skill-development")
-   ```
-   Provide the relevant knowledge subset for each skill.
+## Overview
 
-4. **Validate with plugin-validator**:
-   ```
-   Task(
-     subagent_type: "plugin-dev:plugin-validator",
-     prompt: "Validate the plugin at {output_dir}/plugin/ - check plugin.json, skill structure, and component references"
-   )
-   ```
+{summary from REPORT.md, max 500 chars}
 
-5. **Review skills with skill-reviewer**:
-   ```
-   Task(
-     subagent_type: "plugin-dev:skill-reviewer",
-     prompt: "Review each skill in {output_dir}/plugin/skills/ for quality and best practices"
-   )
-   ```
+## Core Concepts
 
-**Output structure** (created following plugin-dev patterns):
+### {Concept 1}
+
+{definition and explanation}
+
+### {Concept 2}
+
+{definition and explanation}
+
+## Common Use Cases
+
+| Scenario | Solution |
+|----------|----------|
+| {scenario_1} | {solution_1} |
+| {scenario_2} | {solution_2} |
+
+## Quick Reference
+
+{key facts, commands, patterns}
+
+## Examples
+
+### {Example 1}
+
+{code or usage example}
+
+---
+> Generated by Knowledge ETL from {source}
 ```
-output/plugin/
-├── .claude-plugin/
-│   └── plugin.json          # Plugin manifest (name, version, description)
-├── skills/
-│   └── {topic}/
-│       ├── SKILL.md         # Main skill content
-│       └── references/      # Detailed reference files
-├── commands/                 # Optional slash commands
-├── agents/                   # Optional specialized agents
-├── hooks/                    # Optional event hooks
-└── README.md                 # Plugin documentation
-```
-
-**Key principle**: Each component (skill, command, agent) follows its respective plugin-dev skill for structure and best practices.
-
-### 2.3 --pipe=prompt (Direct transformation)
-
-Transform to System Prompt format (no external dependency needed).
 
 **Output structure:**
 ```
-output/prompt/
-└── system-prompt.md
+output/skill/
+├── SKILL.md           # Main skill file
+└── references/        # Optional detailed docs
+    └── {subtopic}.md
 ```
 
+---
+
+### 2.2 --pipe=plugin
+
+Generate Claude Code Plugin structure using built-in template.
+
+**Step 1: Analyze content for plugin structure**
+```
+Determine:
+- Plugin name (from topic)
+- Skills needed (from content sections)
+- Commands needed (from use cases)
+```
+
+**Step 2: Generate plugin.json**
+
+```json
+{
+  "name": "{topic-slug}",
+  "version": "1.0.0",
+  "description": "{description from content}",
+  "author": {
+    "name": "Generated by Knowledge ETL"
+  }
+}
+```
+
+**Step 3: Generate skill(s) using 2.1 template**
+
+**Output structure:**
+```
+output/plugin/
+├── .claude-plugin/
+│   └── plugin.json
+├── skills/
+│   └── {topic}/
+│       └── SKILL.md
+└── README.md
+```
+
+---
+
+### 2.3 --pipe=prompt
+
+Generate System Prompt for LLMs.
+
 **Template:**
+
 ```markdown
-# {topic} System Prompt
+# {Topic} Expert System Prompt
 
 You are an expert in {topic}. Use the following knowledge to answer questions accurately.
 
 ## Core Knowledge
 
-{structured_knowledge_from_report}
+{structured knowledge from REPORT.md}
 
 ## Key Concepts
 
-{concept_definitions}
+{concept definitions}
 
 ## Common Patterns
 
-{patterns_and_examples}
+{patterns and examples}
 
 ## Response Guidelines
 
 - Be concise and accurate
 - Reference specific sections when applicable
 - Provide examples when helpful
+- If unsure, acknowledge limitations
 
 ---
 Knowledge base generated from: {source}
 Generated by: Knowledge ETL
 ```
 
-### 2.4 --pipe=rag (Direct transformation with safeguard)
-
-Transform to RAG-friendly chunks. Apply content-safeguard patterns.
-
-**Output structure:**
+**Output:**
 ```
-output/rag/
-├── chunks/
-│   ├── chunk_001.json
-│   └── ...
-└── metadata.json
+output/prompt/
+└── system-prompt.md
 ```
 
-**Chunking strategy** (apply content-safeguard limits):
+---
+
+### 2.4 --pipe=rag
+
+Generate RAG-friendly chunks for vector databases.
+
+**Chunking Strategy:**
 - Split by headings (H1, H2, H3)
 - Each chunk: 500-1000 characters
-- Overlap: 100 characters between chunks
+- Overlap: 100 characters
 - Preserve code blocks as single chunks
 
 **Chunk format:**
+
 ```json
 {
   "id": "chunk_001",
@@ -225,28 +313,60 @@ output/rag/
   "metadata": {
     "source": "{source_url}",
     "section": "{section_heading}",
-    "topic": "{topic}"
+    "topic": "{topic}",
+    "type": "text|code|table"
   }
 }
 ```
 
-### 2.5 --pipe=docs (Direct transformation)
+**Output:**
+```
+output/rag/
+├── chunks/
+│   ├── chunk_001.json
+│   ├── chunk_002.json
+│   └── ...
+└── metadata.json
+```
 
-**Output structure:**
+---
+
+### 2.5 --pipe=docs
+
+Generate documentation structure.
+
+**Output:**
 ```
 output/docs/
-├── README.md
-├── getting-started.md
+├── README.md           # Overview
+├── getting-started.md  # Quick start guide
 └── reference/
-    └── {topics}.md
+    └── {topics}.md     # Detailed reference
 ```
 
-### 2.6 --pipe=json (Direct transformation)
+---
 
-**Output structure:**
+### 2.6 --pipe=json
+
+Generate structured JSON knowledge base.
+
+**Output:**
 ```
 output/json/
 └── knowledge.json
+```
+
+**Format:**
+```json
+{
+  "topic": "{topic}",
+  "source": "{source}",
+  "generated_at": "{timestamp}",
+  "concepts": [...],
+  "use_cases": [...],
+  "examples": [...],
+  "references": [...]
+}
 ```
 
 ---
@@ -266,20 +386,24 @@ output/json/
 │    - config.json (settings)                                                │
 │    NEVER read pages/*.md directly                                          │
 │                                                                             │
-│  Step 2: Route by Pipe Type                                                │
-│  ──────────────────────────                                                 │
-│    skill/plugin → Invoke plugin-dev skills                                 │
-│    prompt/rag/docs/json → Direct transformation                            │
+│  Step 2: Extract Key Information                                           │
+│  ───────────────────────────────                                            │
+│    - Title and description                                                 │
+│    - Key concepts (max 10)                                                 │
+│    - Use cases (max 5)                                                     │
+│    - Examples (max 3)                                                      │
+│    - Trigger phrases                                                       │
 │                                                                             │
-│  Step 3: Generate Output                                                   │
-│  ───────────────────────                                                    │
+│  Step 3: Apply Template                                                    │
+│  ──────────────────────                                                     │
+│    Select template based on --pipe value                                   │
+│    Fill in extracted information                                           │
+│    Respect size limits                                                     │
+│                                                                             │
+│  Step 4: Write Output                                                      │
+│  ────────────────────                                                       │
 │    Create output/{format}/ directory                                       │
-│    Write files (respecting size limits)                                    │
-│                                                                             │
-│  Step 4: Validate (if applicable)                                          │
-│  ────────────────────────────────                                           │
-│    skill → skill-reviewer                                                  │
-│    plugin → plugin-validator                                               │
+│    Write files                                                             │
 │                                                                             │
 │  Step 5: Return Summary                                                    │
 │  ─────────────────────                                                      │
@@ -290,14 +414,25 @@ output/json/
 
 ---
 
-## 4. Safety Rules (From content-safeguard)
+## ⛔ IRON RULE: "Prompt is too long" = AGENT FAILURE
 
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║                    IRON RULES                                             ║
+║  🚨🚨🚨 IRON RULE: PREVENT "PROMPT IS TOO LONG" AT ALL COSTS 🚨🚨🚨      ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║                                                                           ║
-║  ✅ Read REPORT.md first (already summarized, safe)                      ║
+║  "Prompt is too long" error = COMPLETE PLUGIN FAILURE                    ║
+║  This is UNACCEPTABLE and must be prevented with 100% certainty.         ║
+║                                                                           ║
+║  ❌ NEVER read all pages at once                                         ║
+║  ❌ NEVER read a file >500 lines without chunking                        ║
+║  ❌ NEVER include full page content in output                            ║
+║  ❌ NEVER skip size checks                                               ║
+║  ❌ NEVER use Read() without limit for files you haven't size-checked    ║
+║                                                                           ║
+║  ✅ ALWAYS check file size FIRST: wc -l <file>                           ║
+║  ✅ Read REPORT.md first (already summarized, usually safe)              ║
+║  ✅ For REPORT.md >500 lines: use Read(limit: 500) chunks                ║
 ║  ✅ Only read high-relevance pages if absolutely needed                  ║
 ║  ✅ Process pages one at a time if reading                               ║
 ║  ✅ Output file size limits:                                             ║
@@ -305,92 +440,58 @@ output/json/
 ║     - system-prompt.md: < 20,000 chars                                   ║
 ║     - RAG chunks: 500-1000 chars each                                    ║
 ║                                                                           ║
-║  ❌ NEVER read all pages at once                                         ║
-║  ❌ NEVER include full page content in output                            ║
-║  ❌ NEVER skip size checks                                               ║
-║                                                                           ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
 ---
 
-## 5. Knowledge Preparation for plugin-dev
+## 5. Progress Output (USE TodoWrite - NOT text output!)
 
-When invoking plugin-dev for skill/plugin generation, prepare knowledge as:
-
-```markdown
-## Extracted Knowledge for Skill Generation
-
-**Topic**: {topic}
-**Source**: {source_url_or_path}
-
-### Summary
-{summary_from_report}
-
-### Key Concepts
-- {concept_1}: {definition}
-- {concept_2}: {definition}
-
-### Common Use Cases
-1. {use_case_1}
-2. {use_case_2}
-
-### Example Queries (Triggers)
-- "{trigger_phrase_1}"
-- "{trigger_phrase_2}"
-
-### Reference Information
-{key_facts_and_patterns}
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 NEVER USE TEXT OUTPUT FOR PROGRESS - USE TodoWrite INSTEAD 🚨        ║
+║                                                                           ║
+║  Text output accumulates in context → "Prompt is too long" error          ║
+║  TodoWrite renders in UI statusline → No context growth                   ║
+╚═══════════════════════════════════════════════════════════════════════════╝
 ```
 
-This prepares the content for plugin-dev to transform into proper skill structure.
+**Use TodoWrite to update progress:**
+
+```javascript
+// Initialize at start
+TodoWrite({
+  todos: [
+    { content: "Read source content", status: "in_progress", activeForm: "Reading REPORT.md..." },
+    { content: "Extract key concepts", status: "pending", activeForm: "Extracting concepts" },
+    { content: "Generate output files", status: "pending", activeForm: "Generating files" }
+  ]
+})
+
+// Update during work
+TodoWrite({
+  todos: [
+    { content: "Read source content", status: "completed", activeForm: "Read REPORT.md" },
+    { content: "Extract key concepts", status: "in_progress", activeForm: "Found 8 concepts..." },
+    { content: "Generate output files", status: "pending", activeForm: "Generating files" }
+  ]
+})
+```
+
+**Final output (text only at completion):**
+```
+### ✓ Transform Complete
+- Output: `output/skill/SKILL.md` (1,823 words)
+- References: 3 files generated
+```
 
 ---
 
-## 6. Progress Output (REQUIRED)
-
-Output progress in this format during execution:
-
-```
-[Transform] ████░░░░░░ 20% | reading source content...
-[Transform] ██████░░░░ 40% | invoking plugin-dev:skill-development...
-[Transform] ████████░░ 60% | SKILL.md (1,823 words)
-[Transform] ████████░░ 70% | references/architecture.md ✓
-[Transform] █████████░ 90% | references/best-practices.md ✓
-[Transform] ██████████ 100% ✓ skill generated
-
-[Validate] ██████████ 100% ✓ passed
-```
-
-**For --pipe=plugin (multiple steps):**
-```
-[Transform] ██░░░░░░░░ 20% | plugin-dev:plugin-structure...
-[Transform] ████░░░░░░ 40% | plugin.json created
-[Transform] ██████░░░░ 60% | plugin-dev:skill-development (1/2)...
-[Transform] ████████░░ 80% | plugin-dev:skill-development (2/2)...
-[Transform] ██████████ 100% ✓ plugin generated
-
-[Validate] ████████░░ 80% | plugin-dev:plugin-validator...
-[Validate] ██████████ 100% ✓ passed
-```
-
-**Rules:**
-1. One line per major step
-2. Show which atomic capability is being invoked
-3. Report file creation with size/word count
-4. `...` = in progress, `✓` = done, `⚠` = warning
-
----
-
-## 7. Completion Summary
-
-Return brief summary at the end:
+## 6. Completion Summary
 
 ```
 ━━━ DONE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 → output/{pipe}/SKILL.md (1,823 words)
 → output/{pipe}/references/ (3 files)
-
-✓ Validation: passed
 ```

@@ -26,24 +26,35 @@ You generate summary files from crawl results. Your outputs are:
 
 ---
 
-## 🚨 CRITICAL: Prevent Context Overflow
+## ⛔ IRON RULE: "Prompt is too long" = AGENT FAILURE
 
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║                    SUMMARIZATION SAFETY RULES                             ║
+║  🚨🚨🚨 IRON RULE: PREVENT "PROMPT IS TOO LONG" AT ALL COSTS 🚨🚨🚨      ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║                                                                           ║
+║  "Prompt is too long" error = COMPLETE PLUGIN FAILURE                    ║
+║  This is UNACCEPTABLE and must be prevented with 100% certainty.         ║
+║                                                                           ║
 ║  ❌ NEVER read all page files at once                                    ║
+║  ❌ NEVER read a file >500 lines without chunking                        ║
 ║  ❌ NEVER keep full page content in memory                               ║
 ║  ❌ NEVER generate output > 30,000 chars                                 ║
+║  ❌ NEVER use Read() without checking file size first                    ║
 ║                                                                           ║
+║  ✅ ALWAYS check file size with: wc -l <file> or stat                    ║
+║  ✅ ALWAYS use Read(limit: 500) for large files                          ║
 ║  ✅ Read pages ONE AT A TIME                                             ║
-║  ✅ Extract summary immediately, release content                         ║
+║  ✅ Extract summary immediately (max 500 chars), release content         ║
 ║  ✅ Build output incrementally                                           ║
 ║                                                                           ║
 ║  Pattern:                                                                 ║
 ║    for each page:                                                         ║
-║      content = Read(page)                                                 ║
+║      lines = wc -l < page  # Check size FIRST!                           ║
+║      if lines > 500:                                                      ║
+║        content = Read(page, limit: 500)  # Chunk read                    ║
+║      else:                                                                ║
+║        content = Read(page)                                               ║
 ║      summary = extract_key_info(content)  # max 500 chars                ║
 ║      append summary to output                                            ║
 ║      # content is automatically released                                  ║
@@ -105,7 +116,49 @@ entry_url:  Original entry URL
 
 ---
 
-## 3. Reading Frontmatter Only
+## 3. Reading Strategy: Prefer Summary Files
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  📝 PREFER .summary FILES OVER FULL PAGE CONTENT                          ║
+╠═══════════════════════════════════════════════════════════════════════════╣
+║                                                                           ║
+║  Extractor now generates .summary files alongside each page:             ║
+║                                                                           ║
+║  pages/                                                                   ║
+║  ├── 001_page.md        # Full content (potentially large)               ║
+║  ├── 001_page.summary   # 500-char summary (ALWAYS safe to read)        ║
+║  ├── 002_page.md                                                         ║
+║  ├── 002_page.summary                                                    ║
+║  └── ...                                                                  ║
+║                                                                           ║
+║  PRIORITY:                                                                ║
+║  1. Check for .summary file first → Read it (guaranteed safe)           ║
+║  2. If no .summary → Read frontmatter only (first 20 lines)             ║
+║  3. Only read full content for top 3 highest-relevance pages            ║
+║                                                                           ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+### Reading Summary Files
+
+```bash
+# Check for summary files
+SUMMARY_COUNT=$(ls -1 "${OUTPUT_DIR}/pages/"*.summary 2>/dev/null | wc -l | tr -d ' ')
+
+if [ "$SUMMARY_COUNT" -gt 0 ]; then
+  echo "[Summarizer] Found $SUMMARY_COUNT pre-generated summaries"
+  # Read summary files directly (always safe)
+  for summary in "${OUTPUT_DIR}/pages/"*.summary; do
+    Read("$summary")  # Safe - max 500 chars each
+  done
+else
+  echo "[Summarizer] No summaries found, reading frontmatter only"
+  # Fall back to frontmatter-only approach
+fi
+```
+
+### Reading Frontmatter Only (Fallback)
 
 To avoid reading full page content, use line-limited reads:
 

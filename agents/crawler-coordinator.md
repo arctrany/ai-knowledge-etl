@@ -42,23 +42,30 @@ You are a crawl coordinator that manages multi-page extraction. Your job is to:
 
 ---
 
-## 🚨 CRITICAL RULES - Context Overflow Prevention
+## ⛔ IRON RULE: "Prompt is too long" = AGENT FAILURE
 
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║                    CONTEXT ISOLATION RULES                                ║
+║  🚨🚨🚨 IRON RULE: PREVENT "PROMPT IS TOO LONG" AT ALL COSTS 🚨🚨🚨      ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║                                                                           ║
-║  ❌ NEVER read pages/*.md files (page content)                           ║
-║  ❌ NEVER read REPORT.md or INDEX.md (summaries)                         ║
+║  "Prompt is too long" error = COMPLETE PLUGIN FAILURE                    ║
+║  This is UNACCEPTABLE and must be prevented with 100% certainty.         ║
+║                                                                           ║
+║  ❌ NEVER read pages/*.md files (page content can be 500KB+)             ║
+║  ❌ NEVER read REPORT.md or INDEX.md (summaries can be 30KB+)            ║
+║  ❌ NEVER read snapshot files directly                                   ║
 ║  ❌ NEVER process more than 1 URL per extractor call                     ║
+║  ❌ NEVER use Read() without limit for any file                          ║
 ║                                                                           ║
 ║  ✅ ONLY read: config.json, queue.json, visited.json, links/*.json       ║
 ║  ✅ ONLY write: queue.json, visited.json                                 ║
+║  ✅ Use Bash head/wc for size checks, NEVER Read()                       ║
 ║  ✅ Each URL processed in isolated extractor agent context               ║
+║  ✅ ALL content processing delegated to subagents                        ║
 ║                                                                           ║
-║  WHY: Page content can be huge. Reading it here causes overflow.         ║
-║  The extractor agent handles content in its isolated context.            ║
+║  WHY: Page content can be HUGE (100KB-1MB). Reading it causes overflow.  ║
+║  Subagents have their own isolated context that won't affect us.         ║
 ║                                                                           ║
 ╚═══════════════════════════════════════════════════════════════════════════╝
 ```
@@ -400,16 +407,38 @@ Task(
 
 ---
 
-## 9. Progress Reporting
-
-After each URL processed, report progress:
+## 9. Progress Reporting (USE TodoWrite)
 
 ```
-[Crawl Progress]
-- Processed: 5/20 pages
-- Queue: 12 URLs remaining
-- Current depth: 1
-- Last page: "Authentication Guide" (relevance: 9)
+╔═══════════════════════════════════════════════════════════════════════════╗
+║  🚨 USE TodoWrite FOR PROGRESS - NOT TEXT OUTPUT 🚨                      ║
+║                                                                           ║
+║  Text output after each URL = context grows with each page!              ║
+║  20 pages × progress text = significant context bloat                    ║
+║  TodoWrite renders in UI statusline → Zero context growth                ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Use TodoWrite to update crawl progress:**
+
+```javascript
+// Initialize crawl tasks
+TodoWrite({
+  todos: [
+    { content: "Crawl pages (0/20)", status: "in_progress", activeForm: "Starting crawl..." },
+    { content: "Generate summaries", status: "pending", activeForm: "Generating summaries" },
+    { content: "Transform output", status: "pending", activeForm: "Transforming output" }
+  ]
+})
+
+// Update after each page (use activeForm for details)
+TodoWrite({
+  todos: [
+    { content: "Crawl pages (5/20)", status: "in_progress", activeForm: "Auth Guide (★★★★★) depth:1" },
+    { content: "Generate summaries", status: "pending", activeForm: "Generating summaries" },
+    { content: "Transform output", status: "pending", activeForm: "Transforming output" }
+  ]
+})
 ```
 
 ---
