@@ -1,5 +1,5 @@
 name: knowledge-etl
-version: 3.3.0
+version: 0.1.3
 description: >
   Extract-Transform-Load pipeline for knowledge extraction.
   URLs, images, PDFs, directories, git repos → pure text Markdown.

@@ -1,7 +1,7 @@
 # Knowledge-ETL Centralized Configuration
 # All agents and skills should reference these limits
 
-version: "3.3.0"
+version: "0.1.3"
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  🚨🚨🚨 IRON RULE: PREVENT "PROMPT IS TOO LONG" AT ALL COSTS 🚨🚨🚨      ║

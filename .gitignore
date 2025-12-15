@@ -1,2 +1,19 @@
 # Claude Code files
 .claude*
+
+# Dependencies
+node_modules/
+
+# Output directories
+.knowledge-etl/
+.playwright-mcp/
+
+# MCP config (local)
+.mcp.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Home directory symlink (if any)
+~/

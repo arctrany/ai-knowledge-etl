@@ -17,7 +17,7 @@ description: |-
 
   Triggers: "extract from url", "crawl website", "analyze image", "prompt too large",
   "extract content", "create skill from", "generate rag", "extract with depth"
-version: 3.3.0
+version: 0.1.3
 allowed-tools: Read, Write, Bash, Glob, Grep, AskUserQuestion
 ---
 
